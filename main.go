@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -15,7 +16,7 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	pvController "sigs.k8s.io/sig-storage-lib-external-provisioner/controller"
+	pvController "sigs.k8s.io/sig-storage-lib-external-provisioner/v8/controller"
 )
 
 var (
@@ -52,13 +53,13 @@ func onUsageError(c *cli.Context, err error, isSubcommand bool) error {
 	panic(fmt.Errorf("Usage error, please check your command"))
 }
 
-func RegisterShutdownChannel(done chan struct{}) {
+func RegisterSignalShutdown(shutdownFunc context.CancelFunc) {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		sig := <-sigs
 		logrus.Infof("Receive %v to exit", sig)
-		close(done)
+		shutdownFunc()
 	}()
 }
 
@@ -158,8 +159,8 @@ func loadConfig(kubeconfig string) (*rest.Config, error) {
 	return clientcmd.BuildConfigFromFlags("", kubeconfig)
 }
 
-func findConfigFileFromConfigMap(kubeClient clientset.Interface, namespace, configMapName, key string) (string, error) {
-	cm, err := kubeClient.CoreV1().ConfigMaps(namespace).Get(configMapName, metav1.GetOptions{})
+func findConfigFileFromConfigMap(ctx context.Context, kubeClient clientset.Interface, namespace, configMapName, key string) (string, error) {
+	cm, err := kubeClient.CoreV1().ConfigMaps(namespace).Get(ctx, configMapName, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -171,8 +172,8 @@ func findConfigFileFromConfigMap(kubeClient clientset.Interface, namespace, conf
 }
 
 func startDaemon(c *cli.Context) error {
-	stopCh := make(chan struct{})
-	RegisterShutdownChannel(stopCh)
+	ctx, shutdownFunc := context.WithCancel(context.Background())
+	RegisterSignalShutdown(shutdownFunc)
 
 	config, err := loadConfig(c.String(FlagKubeconfig))
 	if err != nil {
@@ -182,11 +183,6 @@ func startDaemon(c *cli.Context) error {
 	kubeClient, err := clientset.NewForConfig(config)
 	if err != nil {
 		return errors.Wrap(err, "unable to get k8s client")
-	}
-
-	serverVersion, err := kubeClient.Discovery().ServerVersion()
-	if err != nil {
-		return errors.Wrap(err, "Cannot start Provisioner: failed to get Kubernetes server version")
 	}
 
 	provisionerName := c.String(FlagProvisionerName)
@@ -203,7 +199,7 @@ func startDaemon(c *cli.Context) error {
 	}
 	configFile := c.String(FlagConfigFile)
 	if configFile == "" {
-		configFile, err = findConfigFileFromConfigMap(kubeClient, namespace, configMapName, DefaultConfigFileKey)
+		configFile, err = findConfigFileFromConfigMap(ctx, kubeClient, namespace, configMapName, DefaultConfigFileKey)
 		if err != nil {
 			return fmt.Errorf("invalid empty flag %v and it also does not exist at ConfigMap %v/%v with err: %v", FlagConfigFile, namespace, configMapName, err)
 		}
@@ -219,7 +215,7 @@ func startDaemon(c *cli.Context) error {
 	helperPodFile := c.String(FlagHelperPodFile)
 	helperPodYaml := ""
 	if helperPodFile == "" {
-		helperPodYaml, err = findConfigFileFromConfigMap(kubeClient, namespace, configMapName, DefaultHelperPodFile)
+		helperPodYaml, err = findConfigFileFromConfigMap(ctx, kubeClient, namespace, configMapName, DefaultHelperPodFile)
 		if err != nil {
 			return fmt.Errorf("invalid empty flag %v and it also does not exist at ConfigMap %v/%v with err: %v", FlagHelperPodFile, namespace, configMapName, err)
 		}
@@ -245,7 +241,7 @@ func startDaemon(c *cli.Context) error {
 		return fmt.Errorf("invalid zero or negative integer flag %v", FlagWorkerThreads)
 	}
 
-	provisioner, err := NewProvisioner(stopCh, kubeClient, configFile, namespace, configMapName, serviceAccountName, helperPodYaml)
+	provisioner, err := NewProvisioner(ctx, kubeClient, configFile, namespace, configMapName, serviceAccountName, helperPodYaml)
 	if err != nil {
 		return err
 	}
@@ -253,14 +249,13 @@ func startDaemon(c *cli.Context) error {
 		kubeClient,
 		provisionerName,
 		provisioner,
-		serverVersion.GitVersion,
 		pvController.LeaderElection(false),
 		pvController.FailedProvisionThreshold(provisioningRetryCount),
 		pvController.FailedDeleteThreshold(deletionRetryCount),
 		pvController.Threadiness(workerThreads),
 	)
 	logrus.Debug("Provisioner started")
-	pc.Run(stopCh)
+	pc.Run(ctx)
 	logrus.Debug("Provisioner stopped")
 	return nil
 }
