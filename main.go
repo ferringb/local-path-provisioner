@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -30,9 +31,7 @@ func RegisterSignalShutdown(shutdownFunc context.CancelFunc) {
 }
 
 const (
-	VERSION              = "0.0.1"
-	DefaultConfigFileKey = "config.json"
-	DefaultHelperPodFile = "helperPod.yaml"
+	VERSION = "0.0.1"
 )
 
 func kongDefaultVars() kong.Vars {
@@ -44,62 +43,49 @@ func kongDefaultVars() kong.Vars {
 }
 
 type StartCmd struct {
-	Config                 string `default:"config.json" help:"Provisioner config file. If provided, overrides any configs loaded via --config-map-name"`
+	LocalConfig            string `env:"LOCAL_CONFIG" help:"local YAML file to use rather than reading data from configmap.  Primarily for testing"`
 	ProvisionerName        string `env:"PROVISIONER_NAME" default:"rancher.io/local-path"`
 	Namespace              string `env:"POD_NAMESPACE"  default:"local-path-storage" help:"The namespace that Provisioner is running in"`
 	KubeConfig             string `name:"kubeconfig" help:"Paths to a kubeconfig. Only required when it is out-of-cluster."`
 	ConfigmapName          string `default:"local-path-config" help:"Specify configmap name."`
-	HelperPodFile          string `help:"Paths to the Helper pod yaml file"`
 	WorkerThreads          uint16 `default:"${WorkerThreads}" help:"Number of provisioner worker threads."`
 	ProvisioningRetryCount uint32 `default:"${ProvisionRetryCount}" help:"Number of retries of failed volume provisioning. 0 means retry indefinitely."`
 	DeletionRetryCount     uint32 `default:"${DeletionRetryCount}"  help:"Number of retries of failed volume deletion. 0 means retry indefinitely."`
 }
 
 func (s *StartCmd) Run() (err error) {
-	defer func() {
-		if err != nil {
-			err = fmt.Errorf("Error starting daemon: %w", err)
-
-		}
-	}()
 	ctx, shutdownFunc := context.WithCancel(context.Background())
 	RegisterSignalShutdown(shutdownFunc)
 
-	config, err := loadConfig(s.KubeConfig)
+	config := new(Config)
+	if s.LocalConfig != "" {
+		logrus.Infof("attempting to load local ConfigMap data from %s", s.LocalConfig)
+
+		contents, err := ioutil.ReadFile(s.LocalConfig)
+		err = errors.Wrap(err, "while loading local ConfigMap data")
+		if err == nil {
+			err = errors.Wrap(strictYAMLUnmarshal(contents, config), "while deserializing JSON")
+		}
+		if err != nil {
+			return err
+		}
+		logrus.Infof("loaded config: %s", *config)
+	}
+
+	kubeConfig, err := loadConfig(s.KubeConfig)
 	if err != nil {
 		return errors.Wrap(err, "unable to get client config")
 	}
 
-	kubeClient, err := clientset.NewForConfig(config)
+	kubeClient, err := clientset.NewForConfig(kubeConfig)
 	if err != nil {
 		return errors.Wrap(err, "unable to get k8s client")
 	}
 
-	configFile := s.Config
-	if configFile == "" {
-		configFile, err = findConfigFileFromConfigMap(ctx, kubeClient, s.Namespace, s.ConfigmapName, DefaultConfigFileKey)
-		if err != nil {
-			return fmt.Errorf("failed to load config file from ConfigMap %v/%v key %v; either add that value, or provide via a local file.  Error was: %v", s.Namespace, s.ConfigmapName, DefaultConfigFileKey, err)
-		}
+	if config == nil {
+		panic("config must be passed")
 	}
-
-	// if helper pod file is not specified, then find the helper pod by configmap with key = helperPod.yaml
-	// if helper pod file is specified with flag FlagHelperPodFile, then load the file
-	helperPodFile := s.HelperPodFile
-	helperPodYaml := ""
-	if helperPodFile == "" {
-		helperPodYaml, err = findConfigFileFromConfigMap(ctx, kubeClient, s.Namespace, s.ConfigmapName, DefaultHelperPodFile)
-		if err != nil {
-			return fmt.Errorf("failed to load helpoer pod definition from %v/%v key %v; either add that value, or provide it via a local command line flag.  Error was: %v", s.Namespace, s.ConfigmapName, DefaultHelperPodFile, err)
-		}
-	} else {
-		helperPodYaml, err = loadFile(helperPodFile)
-		if err != nil {
-			return fmt.Errorf("could not open file %v with err: %v", helperPodFile, err)
-		}
-	}
-
-	provisioner, err := NewProvisioner(ctx, kubeClient, configFile, s.Namespace, s.ConfigmapName, helperPodYaml)
+	provisioner, err := NewProvisioner(ctx, kubeClient, config, s.Namespace, s.ConfigmapName)
 	if err != nil {
 		return err
 	}

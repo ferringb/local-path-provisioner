@@ -1,12 +1,15 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"os"
 
-	v1 "k8s.io/api/core/v1"
+	encoding_json "encoding/json"
+
+	multierror "github.com/hashicorp/go-multierror"
+	"github.com/pkg/errors"
+	"sigs.k8s.io/json"
 	"sigs.k8s.io/yaml"
 )
 
@@ -23,18 +26,30 @@ func loadFile(filepath string) (string, error) {
 	return string(helperPodYaml), nil
 }
 
-func loadHelperPodFile(helperPodYaml string) (*v1.Pod, error) {
-	helperPodJSON, err := yaml.YAMLToJSON([]byte(helperPodYaml))
+// strictJSONUnmarshal is a helper to force strict unmarshalling of JSON, collapsing the results into a multierror
+func strictJSONUnmarshal[P interface{ *T }, T any](b []byte, result P) error {
+	serr, err := json.UnmarshalStrict(b, result)
+	return multierror.Append(err, serr...).ErrorOrNil()
+}
+
+// strictJSONUnmarshal is a helper to force strict YAML unmarshalling of structs supporting JSON, collapsing the results into a multierror
+func strictYAMLUnmarshal[P interface{ *T }, T any](b []byte, result P) error {
+	jsonData, err := yaml.YAMLToJSONStrict([]byte(b))
+	// correct a yaml -> json difference; yaml.Unmarshal("") yields "", which json doesn't
+	// view as an object; effectively it bypasses the actual parsing.
+	if len(jsonData) == 0 {
+		jsonData = []byte("{}")
+	}
 	if err != nil {
-		return nil, fmt.Errorf("invalid YAMLToJSON the helper pod with helperPodYaml: %v", helperPodYaml)
+		return err
 	}
-	p := v1.Pod{}
-	err = json.Unmarshal(helperPodJSON, &p)
+	return errors.Wrap(strictJSONUnmarshal(jsonData, result), "while converting YAML to json")
+}
+
+func jsonStringer[T any](obj T) string {
+	b, err := encoding_json.MarshalIndent(obj, "", " ")
 	if err != nil {
-		return nil, fmt.Errorf("invalid unmarshal the helper pod with helperPodJson: %v", string(helperPodJSON))
+		return fmt.Sprintf("failed to stringify due to %s", err)
 	}
-	if len(p.Spec.Containers) == 0 {
-		return nil, fmt.Errorf("helper pod template does not specify any container")
-	}
-	return &p, nil
+	return string(b)
 }

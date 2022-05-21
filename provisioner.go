@@ -2,11 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,8 +28,6 @@ const (
 const (
 	KeyNode = "kubernetes.io/hostname"
 
-	NodeDefaultNonListedNodes = "DEFAULT_PATH_FOR_NON_LISTED_NODES"
-
 	helperScriptDir     = "/script"
 	helperDataVolName   = "data"
 	helperScriptVolName = "script"
@@ -42,13 +37,7 @@ const (
 	envVolSize = "VOL_SIZE_BYTES"
 )
 
-const (
-	defaultCmdTimeoutSeconds = 120
-)
-
 var (
-	ConfigFileCheckInterval = 30 * time.Second
-
 	HelperPodNameMaxLength = 128
 )
 
@@ -57,131 +46,20 @@ type LocalPathProvisioner struct {
 	namespace  string
 
 	config        *Config
-	configData    *ConfigData
-	configFile    string
 	configMapName string
 	configMutex   *sync.RWMutex
-	helperPod     *v1.Pod
-}
-
-type NodePathMapData struct {
-	Node  string   `json:"node,omitempty"`
-	Paths []string `json:"paths,omitempty"`
-}
-
-type ConfigData struct {
-	NodePathMap []*NodePathMapData `json:"nodePathMap,omitempty"`
-
-	CmdTimeoutSeconds int `json:"cmdTimeoutSeconds,omitempty"`
-}
-
-type NodePathMap struct {
-	Paths map[string]struct{}
-}
-
-type Config struct {
-	NodePathMap       map[string]*NodePathMap
-	CmdTimeoutSeconds int
 }
 
 func NewProvisioner(ctx context.Context, kubeClient *clientset.Clientset,
-	configFile, namespace, configMapName, helperPodYaml string) (*LocalPathProvisioner, error) {
+	config *Config, namespace string, configMapName string) (result *LocalPathProvisioner, err error) {
 	p := &LocalPathProvisioner{
-		kubeClient: kubeClient,
-		namespace:  namespace,
-
-		// config will be updated shortly by p.refreshConfig()
-		config:        nil,
-		configFile:    configFile,
-		configData:    nil,
+		kubeClient:    kubeClient,
+		config:        config,
+		namespace:     namespace,
 		configMapName: configMapName,
 		configMutex:   &sync.RWMutex{},
 	}
-	var err error
-	p.helperPod, err = loadHelperPodFile(helperPodYaml)
-	if err != nil {
-		return nil, err
-	}
-	if err := p.refreshConfig(); err != nil {
-		return nil, err
-	}
-	p.watchAndRefreshConfig(ctx)
 	return p, nil
-}
-
-func (p *LocalPathProvisioner) refreshConfig() error {
-	p.configMutex.Lock()
-	defer p.configMutex.Unlock()
-
-	configData, err := loadConfigFile(p.configFile)
-	if err != nil {
-		return err
-	}
-	// no need to update
-	if reflect.DeepEqual(configData, p.configData) {
-		return nil
-	}
-	config, err := canonicalizeConfig(configData)
-	if err != nil {
-		return err
-	}
-	// only update the config if the new config file is valid
-	p.configData = configData
-	p.config = config
-
-	output, err := json.Marshal(p.configData)
-	if err != nil {
-		return err
-	}
-	logrus.Debugf("Applied config: %v", string(output))
-
-	return err
-}
-
-func (p *LocalPathProvisioner) watchAndRefreshConfig(ctx context.Context) {
-	go func() {
-		ticker := time.NewTicker(ConfigFileCheckInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				if err := p.refreshConfig(); err != nil {
-					logrus.Errorf("failed to load the new config file: %v", err)
-				}
-			case <-ctx.Done():
-				logrus.Infof("stop watching config file")
-				return
-			}
-		}
-	}()
-}
-
-func (p *LocalPathProvisioner) getRandomPathOnNode(node string) (string, error) {
-	p.configMutex.RLock()
-	defer p.configMutex.RUnlock()
-
-	if p.config == nil {
-		return "", fmt.Errorf("no valid config available")
-	}
-
-	c := p.config
-	npMap := c.NodePathMap[node]
-	if npMap == nil {
-		npMap = c.NodePathMap[NodeDefaultNonListedNodes]
-		if npMap == nil {
-			return "", fmt.Errorf("config doesn't contain node %v, and no %v available", node, NodeDefaultNonListedNodes)
-		}
-		logrus.Debugf("config doesn't contain node %v, use %v instead", node, NodeDefaultNonListedNodes)
-	}
-	paths := npMap.Paths
-	if len(paths) == 0 {
-		return "", fmt.Errorf("no local path available on node %v", node)
-	}
-	path := ""
-	for path = range paths {
-		break
-	}
-	return path, nil
 }
 
 func (p *LocalPathProvisioner) Provision(ctx context.Context, opts pvController.ProvisionOptions) (*v1.PersistentVolume, pvController.ProvisioningState, error) {
@@ -199,20 +77,16 @@ func (p *LocalPathProvisioner) Provision(ctx context.Context, opts pvController.
 		return nil, pvController.ProvisioningFinished, fmt.Errorf("configuration error, no node was specified")
 	}
 
-	basePath, err := p.getRandomPathOnNode(node.Name)
-	if err != nil {
-		return nil, pvController.ProvisioningFinished, err
-	}
+	nodeConfig := p.config.GetNodeConfig(node.Name)
 
 	name := opts.PVName
 	folderName := strings.Join([]string{name, opts.PVC.Namespace, opts.PVC.Name}, "_")
 
-	path := filepath.Join(basePath, folderName)
+	path := filepath.Join(nodeConfig.Path, folderName)
 	logrus.Infof("Creating volume %v at %v:%v", name, node.Name, path)
 
 	storage := pvc.Spec.Resources.Requests[v1.ResourceName(v1.ResourceStorage)]
-	provisionCmd := []string{"/bin/sh", "/script/setup"}
-	if err := p.createHelperPod(ctx, ActionTypeCreate, provisionCmd, volumeOptions{
+	if err := p.createHelperPod(ctx, ActionTypeCreate, nodeConfig, volumeOptions{
 		Name:        name,
 		Path:        path,
 		Mode:        *pvc.Spec.VolumeMode,
@@ -272,20 +146,21 @@ func (p *LocalPathProvisioner) Delete(ctx context.Context, pv *v1.PersistentVolu
 	defer func() {
 		err = errors.Wrapf(err, "failed to delete volume %v", pv.Name)
 	}()
-	path, node, err := p.getPathAndNodeForPV(pv)
+	path, nodeName, err := p.getPathAndNodeFromPV(pv)
 	if err != nil {
 		return err
 	}
+	nodeConfig := p.config.GetNodeConfig(nodeName)
+
 	if pv.Spec.PersistentVolumeReclaimPolicy != v1.PersistentVolumeReclaimRetain {
-		logrus.Infof("Deleting volume %v at %v:%v", pv.Name, node, path)
+		logrus.Infof("Deleting volume %v at %v:%v", pv.Name, nodeName, path)
 		storage := pv.Spec.Capacity[v1.ResourceName(v1.ResourceStorage)]
-		cleanupCmd := []string{"/bin/sh", "/script/teardown"}
-		if err := p.createHelperPod(ctx, ActionTypeDelete, cleanupCmd, volumeOptions{
+		if err := p.createHelperPod(ctx, ActionTypeDelete, nodeConfig, volumeOptions{
 			Name:        pv.Name,
 			Path:        path,
 			Mode:        *pv.Spec.VolumeMode,
 			SizeInBytes: storage.Value(),
-			Node:        node,
+			Node:        nodeName,
 		}); err != nil {
 			logrus.Infof("clean up volume %v failed: %v", pv.Name, err)
 			return err
@@ -296,7 +171,7 @@ func (p *LocalPathProvisioner) Delete(ctx context.Context, pv *v1.PersistentVolu
 	return nil
 }
 
-func (p *LocalPathProvisioner) getPathAndNodeForPV(pv *v1.PersistentVolume) (path, node string, err error) {
+func (p *LocalPathProvisioner) getPathAndNodeFromPV(pv *v1.PersistentVolume) (path, node string, err error) {
 	defer func() {
 		err = errors.Wrapf(err, "failed to delete volume %v", pv.Name)
 	}()
@@ -345,7 +220,7 @@ type volumeOptions struct {
 	Node        string
 }
 
-func (p *LocalPathProvisioner) createHelperPod(ctx context.Context, action ActionType, cmd []string, o volumeOptions) (err error) {
+func (p *LocalPathProvisioner) createHelperPod(ctx context.Context, action ActionType, nodeConfig *NodeConfig, o volumeOptions) (err error) {
 	defer func() {
 		err = errors.Wrapf(err, "failed to %v volume %v", action, o.Name)
 	}()
@@ -394,7 +269,7 @@ func (p *LocalPathProvisioner) createHelperPod(ctx context.Context, action Actio
 			Operator: v1.TolerationOpExists,
 		},
 	}
-	helperPod := p.helperPod.DeepCopy()
+	helperPod := nodeConfig.GetHelperPod()
 
 	scriptMount := addVolumeMount(&helperPod.Spec.Containers[0].VolumeMounts, helperScriptVolName, helperScriptDir)
 	scriptMount.MountPath = helperScriptDir
@@ -429,6 +304,20 @@ func (p *LocalPathProvisioner) createHelperPod(ctx context.Context, action Actio
 	helperPod.Spec.RestartPolicy = v1.RestartPolicyNever
 	helperPod.Spec.Tolerations = append(helperPod.Spec.Tolerations, lpvTolerations...)
 	helperPod.Spec.Volumes = append(helperPod.Spec.Volumes, lpvVolumes...)
+
+	cmd := []string{"/bin/sh"}
+	var cmdTimeout time.Duration
+	switch action {
+	case ActionTypeCreate:
+		cmd = append(cmd, "/script/setup")
+		cmdTimeout = nodeConfig.SetupTimeout
+	case ActionTypeDelete:
+		cmd = append(cmd, "/script/teardown")
+		cmdTimeout = nodeConfig.TeardownTimeout
+	default:
+		return fmt.Errorf("action type %v is unknown/unsupported", action)
+	}
+
 	helperPod.Spec.Containers[0].Command = cmd
 	helperPod.Spec.Containers[0].Env = append(helperPod.Spec.Containers[0].Env, env...)
 	helperPod.Spec.Containers[0].Args = []string{"-p", filepath.Join(parentDir, volumeDir),
@@ -450,8 +339,10 @@ func (p *LocalPathProvisioner) createHelperPod(ctx context.Context, action Actio
 		}
 	}()
 
+	// replace this loop with a watch.
 	completed := false
-	for i := 0; i < p.config.CmdTimeoutSeconds; i++ {
+
+	for i := 0.0; i < cmdTimeout.Seconds(); i++ {
 		if pod, err := p.kubeClient.CoreV1().Pods(p.namespace).Get(ctx, helperPod.Name, metav1.GetOptions{}); err != nil {
 			return err
 		} else if pod.Status.Phase == v1.PodSucceeded {
@@ -461,7 +352,7 @@ func (p *LocalPathProvisioner) createHelperPod(ctx context.Context, action Actio
 		time.Sleep(1 * time.Second)
 	}
 	if !completed {
-		return fmt.Errorf("create process timeout after %v seconds", p.config.CmdTimeoutSeconds)
+		return fmt.Errorf("create process timeout after %v seconds", cmdTimeout.Seconds())
 	}
 
 	logrus.Infof("Volume %v has been %vd on %v:%v", o.Name, action, o.Node, o.Path)
@@ -479,75 +370,4 @@ func addVolumeMount(mounts *[]v1.VolumeMount, name, mountPath string) *v1.Volume
 	}
 	*mounts = append(*mounts, v1.VolumeMount{Name: name, MountPath: mountPath})
 	return &(*mounts)[len(*mounts)-1]
-}
-
-func isJSONFile(configFile string) bool {
-	return strings.HasSuffix(configFile, ".json")
-}
-
-func unmarshalFromString(configFile string) (*ConfigData, error) {
-	var data ConfigData
-	if err := json.Unmarshal([]byte(configFile), &data); err != nil {
-		return nil, err
-	}
-	return &data, nil
-}
-
-func loadConfigFile(configFile string) (cfgData *ConfigData, err error) {
-	defer func() {
-		err = errors.Wrapf(err, "fail to load config file %v", configFile)
-	}()
-
-	if !isJSONFile(configFile) {
-		return unmarshalFromString(configFile)
-	}
-
-	f, err := os.Open(configFile)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	var data ConfigData
-	if err := json.NewDecoder(f).Decode(&data); err != nil {
-		return nil, err
-	}
-	return &data, nil
-}
-
-func canonicalizeConfig(data *ConfigData) (cfg *Config, err error) {
-	defer func() {
-		err = errors.Wrapf(err, "config canonicalization failed")
-	}()
-	cfg = &Config{}
-	cfg.NodePathMap = map[string]*NodePathMap{}
-	for _, n := range data.NodePathMap {
-		if cfg.NodePathMap[n.Node] != nil {
-			return nil, fmt.Errorf("duplicate node %v", n.Node)
-		}
-		npMap := &NodePathMap{Paths: map[string]struct{}{}}
-		cfg.NodePathMap[n.Node] = npMap
-		for _, p := range n.Paths {
-			if p[0] != '/' {
-				return nil, fmt.Errorf("path must start with / for path %v on node %v", p, n.Node)
-			}
-			path, err := filepath.Abs(p)
-			if err != nil {
-				return nil, err
-			}
-			if path == "/" {
-				return nil, fmt.Errorf("cannot use root ('/') as path on node %v", n.Node)
-			}
-			if _, ok := npMap.Paths[path]; ok {
-				return nil, fmt.Errorf("duplicate path %v on node %v", p, n.Node)
-			}
-			npMap.Paths[path] = struct{}{}
-		}
-	}
-	if data.CmdTimeoutSeconds > 0 {
-		cfg.CmdTimeoutSeconds = data.CmdTimeoutSeconds
-	} else {
-		cfg.CmdTimeoutSeconds = defaultCmdTimeoutSeconds
-	}
-	return cfg, nil
 }
