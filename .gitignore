@@ -6,3 +6,5 @@
 .idea
 .vscode/
 Dockerfile.dapper[0-9]*
+/package/bin
+/local-path-provisioner
