@@ -27,9 +27,6 @@ var (
 	FlagNamespace                 = "namespace"
 	EnvNamespace                  = "POD_NAMESPACE"
 	DefaultNamespace              = "local-path-storage"
-	FlagHelperImage               = "helper-image"
-	EnvHelperImage                = "HELPER_IMAGE"
-	DefaultHelperImage            = "rancher/library-busybox:1.32.1"
 	FlagServiceAccountName        = "service-account-name"
 	DefaultServiceAccount         = "local-path-provisioner-service-account"
 	EnvServiceAccountName         = "SERVICE_ACCOUNT_NAME"
@@ -85,12 +82,6 @@ func StartCmd() cli.Command {
 				Usage:  "Required. The namespace that Provisioner is running in",
 				EnvVar: EnvNamespace,
 				Value:  DefaultNamespace,
-			},
-			cli.StringFlag{
-				Name:   FlagHelperImage,
-				Usage:  "Required. The helper image used for create/delete directories on the host",
-				EnvVar: EnvHelperImage,
-				Value:  DefaultHelperImage,
 			},
 			cli.StringFlag{
 				Name:  FlagKubeconfig,
@@ -217,10 +208,6 @@ func startDaemon(c *cli.Context) error {
 			return fmt.Errorf("invalid empty flag %v and it also does not exist at ConfigMap %v/%v with err: %v", FlagConfigFile, namespace, configMapName, err)
 		}
 	}
-	helperImage := c.String(FlagHelperImage)
-	if helperImage == "" {
-		return fmt.Errorf("invalid empty flag %v", FlagHelperImage)
-	}
 
 	serviceAccountName := c.String(FlagServiceAccountName)
 	if serviceAccountName == "" {
@@ -258,7 +245,7 @@ func startDaemon(c *cli.Context) error {
 		return fmt.Errorf("invalid zero or negative integer flag %v", FlagWorkerThreads)
 	}
 
-	provisioner, err := NewProvisioner(stopCh, kubeClient, configFile, namespace, helperImage, configMapName, serviceAccountName, helperPodYaml)
+	provisioner, err := NewProvisioner(stopCh, kubeClient, configFile, namespace, configMapName, serviceAccountName, helperPodYaml)
 	if err != nil {
 		return err
 	}

@@ -55,7 +55,6 @@ type LocalPathProvisioner struct {
 	stopCh             chan struct{}
 	kubeClient         *clientset.Clientset
 	namespace          string
-	helperImage        string
 	serviceAccountName string
 
 	config        *Config
@@ -87,13 +86,12 @@ type Config struct {
 }
 
 func NewProvisioner(stopCh chan struct{}, kubeClient *clientset.Clientset,
-	configFile, namespace, helperImage, configMapName, serviceAccountName, helperPodYaml string) (*LocalPathProvisioner, error) {
+	configFile, namespace, configMapName, serviceAccountName, helperPodYaml string) (*LocalPathProvisioner, error) {
 	p := &LocalPathProvisioner{
 		stopCh: stopCh,
 
 		kubeClient:         kubeClient,
 		namespace:          namespace,
-		helperImage:        helperImage,
 		serviceAccountName: serviceAccountName,
 
 		// config will be updated shortly by p.refreshConfig()
