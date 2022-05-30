@@ -77,6 +77,7 @@ func (s *StartCmd) Run() (err error) {
 		return errors.Wrap(err, "unable to get client config")
 	}
 
+	// TODO: rewrite this to use https://pkg.go.dev/k8s.io/client-go/tools/clientcmd
 	kubeClient, err := clientset.NewForConfig(kubeConfig)
 	if err != nil {
 		return errors.Wrap(err, "unable to get k8s client")
