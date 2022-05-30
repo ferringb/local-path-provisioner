@@ -175,16 +175,11 @@ func (p *LocalPathProvisioner) Delete(ctx context.Context, pv *v1.PersistentVolu
 	return nil
 }
 
-func (p *LocalPathProvisioner) getPathAndNodeFromPV(pv *v1.PersistentVolume) (path, node string, err error) {
-	defer func() {
-		err = errors.Wrapf(err, "failed to delete volume %v", pv.Name)
-	}()
-
+func (p *LocalPathProvisioner) getPathAndNodeFromPV(pv *v1.PersistentVolume) (string, string, error) {
 	hostPath := pv.Spec.PersistentVolumeSource.HostPath
 	if hostPath == nil {
 		return "", "", fmt.Errorf("no HostPath set")
 	}
-	path = hostPath.Path
 
 	nodeAffinity := pv.Spec.NodeAffinity
 	if nodeAffinity == nil {
@@ -195,25 +190,17 @@ func (p *LocalPathProvisioner) getPathAndNodeFromPV(pv *v1.PersistentVolume) (pa
 		return "", "", fmt.Errorf("no NodeAffinity.Required set")
 	}
 
-	node = ""
 	for _, selectorTerm := range required.NodeSelectorTerms {
 		for _, expression := range selectorTerm.MatchExpressions {
 			if expression.Key == KeyNode && expression.Operator == v1.NodeSelectorOpIn {
 				if len(expression.Values) != 1 {
 					return "", "", fmt.Errorf("multiple values for the node affinity")
 				}
-				node = expression.Values[0]
-				break
+				return hostPath.Path, expression.Values[0], nil
 			}
 		}
-		if node != "" {
-			break
-		}
 	}
-	if node == "" {
-		return "", "", fmt.Errorf("cannot find affinited node")
-	}
-	return path, node, nil
+	return "", "", fmt.Errorf("cannot find affinited node")
 }
 
 type volumeOptions struct {
