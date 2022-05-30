@@ -20,7 +20,7 @@ import (
 	pvController "sigs.k8s.io/sig-storage-lib-external-provisioner/v8/controller"
 )
 
-func RegisterSignalShutdown(shutdownFunc context.CancelFunc) {
+func registerSignalShutdown(shutdownFunc context.CancelFunc) {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -55,7 +55,7 @@ type StartCmd struct {
 
 func (s *StartCmd) Run() (err error) {
 	ctx, shutdownFunc := context.WithCancel(context.Background())
-	RegisterSignalShutdown(shutdownFunc)
+	registerSignalShutdown(shutdownFunc)
 
 	config := new(Config)
 	if s.LocalConfig != "" {
