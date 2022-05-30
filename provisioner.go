@@ -63,6 +63,8 @@ func NewProvisioner(ctx context.Context, kubeClient *clientset.Clientset,
 }
 
 func (p *LocalPathProvisioner) Provision(ctx context.Context, opts pvController.ProvisionOptions) (*v1.PersistentVolume, pvController.ProvisioningState, error) {
+	p.configMutex.RLock()
+	defer p.configMutex.RUnlock()
 	pvc := opts.PVC
 	if pvc.Spec.Selector != nil {
 		return nil, pvController.ProvisioningFinished, fmt.Errorf("claim.Spec.Selector is not supported")
@@ -143,6 +145,8 @@ func (p *LocalPathProvisioner) Provision(ctx context.Context, opts pvController.
 }
 
 func (p *LocalPathProvisioner) Delete(ctx context.Context, pv *v1.PersistentVolume) (err error) {
+	p.configMutex.RLock()
+	defer p.configMutex.RUnlock()
 	defer func() {
 		err = errors.Wrapf(err, "failed to delete volume %v", pv.Name)
 	}()
