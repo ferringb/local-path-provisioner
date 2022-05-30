@@ -53,9 +53,8 @@ var (
 )
 
 type LocalPathProvisioner struct {
-	kubeClient         *clientset.Clientset
-	namespace          string
-	serviceAccountName string
+	kubeClient *clientset.Clientset
+	namespace  string
 
 	config        *Config
 	configData    *ConfigData
@@ -86,11 +85,10 @@ type Config struct {
 }
 
 func NewProvisioner(ctx context.Context, kubeClient *clientset.Clientset,
-	configFile, namespace, configMapName, serviceAccountName, helperPodYaml string) (*LocalPathProvisioner, error) {
+	configFile, namespace, configMapName, helperPodYaml string) (*LocalPathProvisioner, error) {
 	p := &LocalPathProvisioner{
-		kubeClient:         kubeClient,
-		namespace:          namespace,
-		serviceAccountName: serviceAccountName,
+		kubeClient: kubeClient,
+		namespace:  namespace,
 
 		// config will be updated shortly by p.refreshConfig()
 		config:        nil,
@@ -420,9 +418,14 @@ func (p *LocalPathProvisioner) createHelperPod(ctx context.Context, action Actio
 	if len(helperPod.Name) > HelperPodNameMaxLength {
 		helperPod.Name = helperPod.Name[:HelperPodNameMaxLength]
 	}
+	// disable K8s api access unless the podspec has an explicit service account.
+	if helperPod.Spec.ServiceAccountName == "" && helperPod.Spec.DeprecatedServiceAccount == "" {
+		logrus.Debug("disabling serviceAccount token mounting since no service account is set")
+		b := false
+		helperPod.Spec.AutomountServiceAccountToken = &b
+	}
 	helperPod.Namespace = p.namespace
 	helperPod.Spec.NodeName = o.Node
-	helperPod.Spec.ServiceAccountName = p.serviceAccountName
 	helperPod.Spec.RestartPolicy = v1.RestartPolicyNever
 	helperPod.Spec.Tolerations = append(helperPod.Spec.Tolerations, lpvTolerations...)
 	helperPod.Spec.Volumes = append(helperPod.Spec.Volumes, lpvVolumes...)

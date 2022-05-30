@@ -47,7 +47,6 @@ type StartCmd struct {
 	Config                 string `default:"config.json" help:"Provisioner config file. If provided, overrides any configs loaded via --config-map-name"`
 	ProvisionerName        string `env:"PROVISIONER_NAME" default:"rancher.io/local-path"`
 	Namespace              string `env:"POD_NAMESPACE"  default:"local-path-storage" help:"The namespace that Provisioner is running in"`
-	ServiceAccountName     string `env:"SERVICE_ACCOUNT_NAME" default:"local-path-provisioner-service-account" help:"Required. The ServiceAccountName for deployment"`
 	KubeConfig             string `name:"kubeconfig" help:"Paths to a kubeconfig. Only required when it is out-of-cluster."`
 	ConfigmapName          string `default:"local-path-config" help:"Specify configmap name."`
 	HelperPodFile          string `help:"Paths to the Helper pod yaml file"`
@@ -100,7 +99,7 @@ func (s *StartCmd) Run() (err error) {
 		}
 	}
 
-	provisioner, err := NewProvisioner(ctx, kubeClient, configFile, s.Namespace, s.ConfigmapName, s.ServiceAccountName, helperPodYaml)
+	provisioner, err := NewProvisioner(ctx, kubeClient, configFile, s.Namespace, s.ConfigmapName, helperPodYaml)
 	if err != nil {
 		return err
 	}
